@@ -495,6 +495,11 @@ public class StringSubstitutor {
     private StringLookup variableResolver;
 
     /**
+     * The tracer observing the current {@link #replaceWithTrace(Object)} call, or null when not tracing.
+     */
+    private SubstitutionTracer tracer;
+
+    /**
      * Constructs a new instance with defaults for variable prefix and suffix and the escaping character.
      */
     public StringSubstitutor() {
@@ -898,6 +903,46 @@ public class StringSubstitutor {
         final TextStringBuilder buf = new TextStringBuilder().append(source);
         substitute(buf, 0, buf.length());
         return buf.toString();
+    }
+
+    /**
+     * Replaces all the occurrences of variables in the given source object with their matching values from the
+     * resolver, and traces the substitution. The input source object is converted to a string using {@code toString}
+     * and is not altered.
+     * <p>
+     * The returned {@link SubstitutionTrace} contains the same result string that {@link #replace(Object)} would
+     * produce, plus the provenance of every output range: each range of the result is mapped either to a range of the
+     * original template or to the variable resolution step that produced it. Nested variable names, default values,
+     * escapes, and recursive substitution in variable values all retain their parent-child resolution chains, so any
+     * output character can be traced back to the variable reference in the original template that ultimately produced
+     * it. All offsets are UTF-16 based, matching {@link String} indexing.
+     * </p>
+     * <p>
+     * Tracing does not change the substitution semantics: each variable is resolved exactly as often as it would be
+     * by {@link #replace(Object)}, and the configured {@link StringLookup} is never invoked an extra time for
+     * tracing purposes.
+     * </p>
+     *
+     * @param source The source to replace in, null returns null.
+     * @return The result of the replace operation along with its provenance trace.
+     * @throws IllegalArgumentException if a variable is not found and enableUndefinedVariableException is true.
+     * @since 1.15.0
+     */
+    public SubstitutionTrace replaceWithTrace(final Object source) {
+        if (source == null) {
+            return null;
+        }
+        final TextStringBuilder buf = new TextStringBuilder().append(source);
+        final SubstitutionTracer newTracer = new SubstitutionTracer();
+        newTracer.beginTemplate(buf);
+        final SubstitutionTracer previousTracer = tracer;
+        tracer = newTracer;
+        try {
+            substitute(buf, 0, buf.length());
+        } finally {
+            tracer = previousTracer;
+        }
+        return newTracer.build(buf.toString());
     }
 
     /**
@@ -1478,6 +1523,9 @@ public class StringSubstitutor {
                                 pos = escapedVariableStartsWithNestedPrefix && !hasOuterSuffix ? escPos : startPos + 1;
                                 // delete escape
                                 builder.deleteCharAt(escPos);
+                                if (tracer != null) {
+                                    tracer.deleteCharAt(builder, escPos);
+                                }
                                 escPos = -1;
                                 lengthChange--;
                                 altered = true;
@@ -1489,6 +1537,9 @@ public class StringSubstitutor {
                             String varNameExpr = builder.midString(startPos + startMatchLen, pos - startPos - startMatchLen);
                             if (substitutionInVariablesEnabled) {
                                 final TextStringBuilder bufName = new TextStringBuilder(varNameExpr);
+                                if (tracer != null) {
+                                    tracer.beginNestedBuffer(builder, bufName, startPos + startMatchLen, pos);
+                                }
                                 substitute(bufName, 0, bufName.length());
                                 varNameExpr = bufName.toString();
                             }
@@ -1523,11 +1574,15 @@ public class StringSubstitutor {
                             priorVariables.add(varName);
                             // resolve the variable
                             String varValue = resolveVariable(varName, builder, startPos, endPos);
+                            final boolean defaultValueUsed = varValue == null && varDefaultValue != null;
                             if (varValue == null) {
                                 varValue = varDefaultValue;
                             }
                             if (varValue != null) {
                                 final int varLen = varValue.length();
+                                if (tracer != null) {
+                                    tracer.beforeReplace(builder, startPos, endPos, varName, varValue, defaultValueUsed);
+                                }
                                 builder.replace(startPos, endPos, varValue);
                                 altered = true;
                                 int change = 0;
